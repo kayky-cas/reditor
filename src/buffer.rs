@@ -57,4 +57,8 @@ impl Buffer {
             l2.push_str(&l1)
         }
     }
+
+    pub fn delete_line(&mut self, line: usize) {
+        self.content.remove(line);
+    }
 }

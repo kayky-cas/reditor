@@ -1,4 +1,3 @@
-use core::panic;
 use std::{
     cmp::min,
     io::{self, Stdout, Write},
@@ -69,6 +68,7 @@ enum Action {
     Move(Direction),
     Change(Mode, Option<Direction>),
     Delete,
+    DeleteLine,
     Quit,
 }
 
@@ -135,6 +135,7 @@ impl Editor {
 
                     if let Some(buf) = self.current_buf_mut() {
                         buf.concat_lines(cursor.y + 1, cursor.y);
+                        self.clear_last_line(&mut stdout)?;
                         self.draw_buffer(&mut stdout)?;
                     }
                 }
@@ -199,6 +200,17 @@ impl Editor {
                         self.mode = Mode::Insert;
                     }
                 }
+                (Action::DeleteLine, Mode::Normal) => {
+                    let cursor = self.cursor;
+
+                    if let Some(buf) = self.current_buf_mut() {
+                        buf.delete_line(cursor.y);
+                        self.clear_last_line(&mut stdout)?;
+                        self.handle_cursor_movment(Direction::Up);
+                        self.draw_buffer(&mut stdout)?;
+                    }
+                }
+                (Action::DeleteLine, _) => todo!(),
             };
         }
 
@@ -263,7 +275,12 @@ impl Editor {
             }
             Direction::Left => self.cursor.x = self.cursor.x.saturating_sub(1),
             Direction::Right => {
-                let width = current_buffer.line_width(self.cursor.y).unwrap_or(0);
+                let mut width = current_buffer.line_width(self.cursor.y).unwrap_or(0);
+
+                if matches!(self.mode, Mode::Normal) {
+                    width -= 1;
+                }
+
                 self.cursor.x = min(width, self.cursor.x + 1)
             }
         }
@@ -281,6 +298,17 @@ impl Editor {
 
     fn current_buf_mut(&mut self) -> Option<&mut Buffer> {
         self.buffers.get_mut(self.current_buf_idx)
+    }
+
+    fn clear_last_line(&self, stdout: &mut Stdout) -> anyhow::Result<()> {
+        if let Some(current_buffer) = self.current_buf() {
+            stdout.queue(cursor::MoveTo(0, current_buffer.height() as u16))?;
+            stdout.queue(terminal::Clear(terminal::ClearType::CurrentLine))?;
+
+            self.move_cursor(stdout)?;
+        };
+
+        Ok(())
     }
 }
 
@@ -303,6 +331,7 @@ impl HandleEvent for Normal {
                 KeyCode::Char('O') => Some(Action::Line(Direction::Up)),
                 KeyCode::Char('o') => Some(Action::Line(Direction::Down)),
                 KeyCode::Char('q') => Some(Action::Quit),
+                KeyCode::Char('D') => Some(Action::DeleteLine),
                 _ => None,
             },
             _ => None,
