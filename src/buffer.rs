@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::editor::Cursor;
+
 const LINE_CAP: usize = 10;
 
 #[derive(Default)]
@@ -24,13 +26,35 @@ impl Buffer {
         self.content.len()
     }
 
-    pub fn insert_at(&mut self, (x, y): (u16, u16), ch: char) {
-        if let Some(line) = self.content.get_mut(y as usize) {
-            line.insert(x as usize, ch)
+    pub fn insert_at(&mut self, Cursor { x, y }: Cursor, ch: char) {
+        if let Some(line) = self.content.get_mut(y) {
+            line.insert(x, ch)
         }
     }
 
     pub fn new_line(&mut self, at: usize) {
         self.content.insert(at, String::with_capacity(LINE_CAP));
+    }
+
+    pub fn break_line(&mut self, Cursor { x, y }: Cursor) {
+        if let Some(line) = self.content.get_mut(y) {
+            let new_line = line[x..].to_owned();
+            line.truncate(x);
+            self.content.insert(y + 1, new_line);
+        }
+    }
+
+    pub fn delete_at(&mut self, Cursor { x, y }: Cursor) {
+        if let Some(line) = self.content.get_mut(y) {
+            line.remove(x);
+        }
+    }
+
+    pub fn concat_lines(&mut self, l1: usize, l2: usize) {
+        let l1 = self.content.remove(l1);
+
+        if let Some(l2) = self.content.get_mut(l2) {
+            l2.push_str(&l1)
+        }
     }
 }

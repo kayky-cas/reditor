@@ -1,18 +1,54 @@
+use core::panic;
 use std::{
     cmp::min,
     io::{self, Stdout, Write},
+    ops::{Add, Sub},
 };
 
 use anyhow::Ok;
 use crossterm::{
     cursor,
-    event::{self, KeyCode, ModifierKeyCode},
+    event::{self, KeyCode},
     style,
     terminal::{self, disable_raw_mode, enable_raw_mode},
     ExecutableCommand, QueueableCommand,
 };
 
 use crate::buffer::Buffer;
+
+#[derive(Default, Copy, Clone)]
+pub struct Cursor {
+    pub x: usize,
+    pub y: usize,
+}
+
+impl Cursor {
+    fn new(x: usize, y: usize) -> Self {
+        Self { x, y }
+    }
+}
+
+impl Add for Cursor {
+    type Output = Cursor;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
+        }
+    }
+}
+
+impl Sub for Cursor {
+    type Output = Cursor;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self {
+            x: self.x - rhs.x,
+            y: self.y - rhs.y,
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 enum Mode {
@@ -31,7 +67,8 @@ enum Action {
     Input(char),
     Line(Direction),
     Move(Direction),
-    Change(Mode),
+    Change(Mode, Option<Direction>),
+    Delete,
     Quit,
 }
 
@@ -39,7 +76,7 @@ pub struct Editor {
     buffers: Vec<Buffer>,
     current_buf_idx: usize,
     mode: Mode,
-    cursor: (u16, u16),
+    cursor: Cursor,
 }
 
 impl Default for Editor {
@@ -48,7 +85,7 @@ impl Default for Editor {
             current_buf_idx: 0,
             buffers: vec![Buffer::mock()],
             mode: Mode::Normal,
-            cursor: (0, 0),
+            cursor: Cursor::default(),
         }
     }
 }
@@ -84,7 +121,33 @@ impl Editor {
             match (action, self.mode) {
                 (Action::Move(direction), _) => self.handle_cursor_movment(direction),
                 (Action::Quit, _) => break,
-                (Action::Change(mode), _) => self.mode = mode,
+                (Action::Change(mode, Some(direction)), _) => {
+                    self.mode = mode;
+                    self.handle_cursor_movment(direction)
+                }
+                (Action::Change(mode, None), _) => self.mode = mode,
+                (Action::Delete, Mode::Insert) if self.cursor.x == 0 && self.cursor.y > 0 => {
+                    stdout.queue(terminal::Clear(terminal::ClearType::CurrentLine))?;
+
+                    self.handle_cursor_movment(Direction::Up);
+                    self.move_cursor_end_of_the_line();
+                    let cursor = self.cursor;
+
+                    if let Some(buf) = self.current_buf_mut() {
+                        buf.concat_lines(cursor.y + 1, cursor.y);
+                        self.draw_buffer(&mut stdout)?;
+                    }
+                }
+                (Action::Delete, Mode::Insert) if self.cursor.x > 0 => {
+                    let cursor = self.cursor;
+
+                    if let Some(buf) = self.current_buf_mut() {
+                        buf.delete_at(cursor - Cursor::new(1, 0));
+                        self.handle_cursor_movment(Direction::Left);
+                        self.draw_buffer(&mut stdout)?;
+                    }
+                }
+                (Action::Delete, _) => {}
                 (Action::Input(ch), Mode::Insert) => {
                     let cursor = self.cursor;
 
@@ -101,10 +164,10 @@ impl Editor {
                     if let Some(buf) = self.current_buf_mut() {
                         match direction {
                             Direction::Up => {
-                                buf.new_line((cursor.1) as usize);
+                                buf.new_line(cursor.y);
                             }
                             Direction::Down => {
-                                buf.new_line((cursor.1 + 1) as usize);
+                                buf.new_line(cursor.y + 1);
                                 self.handle_cursor_movment(Direction::Down);
                             }
                             Direction::Left => unreachable!(),
@@ -115,7 +178,27 @@ impl Editor {
                         self.mode = Mode::Insert;
                     }
                 }
-                (Action::Line(_), _) => unreachable!(),
+                (Action::Line(direction), Mode::Insert) => {
+                    let cursor = self.cursor;
+
+                    if let Some(buf) = self.current_buf_mut() {
+                        match direction {
+                            Direction::Up => {
+                                buf.break_line(cursor);
+                            }
+                            Direction::Down => {
+                                buf.break_line(cursor);
+                                self.handle_cursor_movment(Direction::Down);
+                                self.move_cursor_start_of_the_line();
+                            }
+                            Direction::Left => unreachable!(),
+                            Direction::Right => unreachable!(),
+                        }
+
+                        self.draw_buffer(&mut stdout)?;
+                        self.mode = Mode::Insert;
+                    }
+                }
             };
         }
 
@@ -142,33 +225,52 @@ impl Editor {
         Ok(())
     }
 
+    fn move_cursor_start_of_the_line(&mut self) {
+        self.cursor.x = 0;
+    }
+
+    fn move_cursor_end_of_the_line(&mut self) {
+        if let Some(current_buffer) = self.current_buf() {
+            self.cursor.x = current_buffer.line_width(self.cursor.x).unwrap_or(0);
+        };
+    }
+
     fn handle_cursor_movment(&mut self, direction: Direction) {
         let Some(current_buffer) = self.current_buf() else {
             return;
         };
 
         match direction {
-            Direction::Up => self.cursor.1 = self.cursor.1.saturating_sub(1),
-            Direction::Down => {
-                let line = min(current_buffer.height() as u16, self.cursor.1 + 1);
-                let width = current_buffer.line_width(line as usize).unwrap_or(0) as u16;
-
-                self.cursor.1 = line;
-                self.cursor.0 = min(width, self.cursor.0);
-            }
-            Direction::Left => self.cursor.0 = self.cursor.0.saturating_sub(1),
-            Direction::Right => {
+            Direction::Up => {
+                let line = self.cursor.y.saturating_sub(1);
                 let width = current_buffer
-                    .line_width(self.cursor.1 as usize)
-                    .unwrap_or(0) as u16;
+                    .line_width(line)
+                    .unwrap_or(0)
+                    .saturating_sub(1);
 
-                self.cursor.0 = min(width, self.cursor.0 + 1)
+                self.cursor.y = line;
+                self.cursor.x = min(width, self.cursor.x);
+            }
+            Direction::Down => {
+                let line = min(current_buffer.height().saturating_sub(1), self.cursor.y + 1);
+                let width = current_buffer
+                    .line_width(line)
+                    .unwrap_or(0)
+                    .saturating_sub(1);
+
+                self.cursor.y = line;
+                self.cursor.x = min(width, self.cursor.x);
+            }
+            Direction::Left => self.cursor.x = self.cursor.x.saturating_sub(1),
+            Direction::Right => {
+                let width = current_buffer.line_width(self.cursor.y).unwrap_or(0);
+                self.cursor.x = min(width, self.cursor.x + 1)
             }
         }
     }
 
     fn move_cursor(&self, stdout: &mut Stdout) -> anyhow::Result<()> {
-        stdout.queue(cursor::MoveTo(self.cursor.0, self.cursor.1))?;
+        stdout.queue(cursor::MoveTo(self.cursor.x as u16, self.cursor.y as u16))?;
 
         Ok(())
     }
@@ -196,7 +298,8 @@ impl HandleEvent for Normal {
                 KeyCode::Char('k') => Some(Action::Move(Direction::Up)),
                 KeyCode::Char('h') => Some(Action::Move(Direction::Left)),
                 KeyCode::Char('l') => Some(Action::Move(Direction::Right)),
-                KeyCode::Char('i') => Some(Action::Change(Mode::Insert)),
+                KeyCode::Char('i') => Some(Action::Change(Mode::Insert, None)),
+                KeyCode::Char('a') => Some(Action::Change(Mode::Insert, Some(Direction::Right))),
                 KeyCode::Char('O') => Some(Action::Line(Direction::Up)),
                 KeyCode::Char('o') => Some(Action::Line(Direction::Down)),
                 KeyCode::Char('q') => Some(Action::Quit),
@@ -213,7 +316,12 @@ impl HandleEvent for Insert {
     fn handle(event: event::Event) -> Option<Action> {
         match event {
             event::Event::Key(event) => match event.code {
-                KeyCode::Esc => Some(Action::Change(Mode::Normal)),
+                KeyCode::Esc => Some(Action::Change(Mode::Normal, Some(Direction::Left))),
+                KeyCode::Char('[') if event.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                    Some(Action::Change(Mode::Normal, Some(Direction::Left)))
+                }
+                KeyCode::Enter => Some(Action::Line(Direction::Down)),
+                KeyCode::Backspace => Some(Action::Delete),
                 KeyCode::Char(ch) => Some(Action::Input(ch)),
                 _ => None,
             },
