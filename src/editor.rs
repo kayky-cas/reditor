@@ -13,7 +13,7 @@ use crossterm::{
     ExecutableCommand, QueueableCommand,
 };
 
-use crate::buffer::Buffer;
+use crate::{buffer::Buffer, pos::Pos};
 
 #[derive(Default, Copy, Clone)]
 pub struct Cursor {
@@ -50,12 +50,12 @@ impl Sub for Cursor {
 }
 
 #[derive(Clone, Copy)]
-enum Mode {
+pub enum Mode {
     Normal,
     Insert,
 }
 
-enum Direction {
+pub enum Direction {
     Up,
     Down,
     Left,
@@ -76,7 +76,6 @@ pub struct Editor {
     buffers: Vec<Buffer>,
     current_buf_idx: usize,
     mode: Mode,
-    cursor: Cursor,
 }
 
 impl Default for Editor {
@@ -85,7 +84,6 @@ impl Default for Editor {
             current_buf_idx: 0,
             buffers: vec![Buffer::mock()],
             mode: Mode::Normal,
-            cursor: Cursor::default(),
         }
     }
 }
@@ -118,6 +116,8 @@ impl Editor {
                 continue;
             };
 
+            let cursor = self.cursor();
+
             match (action, self.mode) {
                 (Action::Move(direction), _) => self.handle_cursor_movment(direction),
                 (Action::Quit, _) => break,
@@ -126,12 +126,11 @@ impl Editor {
                     self.handle_cursor_movment(direction)
                 }
                 (Action::Change(mode, None), _) => self.mode = mode,
-                (Action::Delete, Mode::Insert) if self.cursor.x == 0 && self.cursor.y > 0 => {
+                (Action::Delete, Mode::Insert) if cursor.x == 0 && cursor.y > 0 => {
                     stdout.queue(terminal::Clear(terminal::ClearType::CurrentLine))?;
 
                     self.handle_cursor_movment(Direction::Up);
                     self.move_cursor_end_of_the_line();
-                    let cursor = self.cursor;
 
                     if let Some(buf) = self.current_buf_mut() {
                         buf.concat_lines(cursor.y + 1, cursor.y);
@@ -139,29 +138,23 @@ impl Editor {
                         self.draw_buffer(&mut stdout)?;
                     }
                 }
-                (Action::Delete, Mode::Insert) if self.cursor.x > 0 => {
-                    let cursor = self.cursor;
-
+                (Action::Delete, Mode::Insert) if cursor.x > 0 => {
                     if let Some(buf) = self.current_buf_mut() {
-                        buf.delete_at(cursor - Cursor::new(1, 0));
+                        buf.delete_at(Some(Direction::Up));
                         self.handle_cursor_movment(Direction::Left);
                         self.draw_buffer(&mut stdout)?;
                     }
                 }
                 (Action::Delete, _) => {}
                 (Action::Input(ch), Mode::Insert) => {
-                    let cursor = self.cursor;
-
                     if let Some(buf) = self.current_buf_mut() {
-                        buf.insert_at(cursor, ch);
+                        buf.insert_at(ch);
                         self.handle_cursor_movment(Direction::Right);
                         self.draw_buffer(&mut stdout)?;
                     }
                 }
                 (Action::Input(_), _) => unreachable!(),
                 (Action::Line(direction), Mode::Normal) => {
-                    let cursor = self.cursor;
-
                     if let Some(buf) = self.current_buf_mut() {
                         match direction {
                             Direction::Up => {
@@ -180,15 +173,14 @@ impl Editor {
                     }
                 }
                 (Action::Line(direction), Mode::Insert) => {
-                    let cursor = self.cursor;
-
                     if let Some(buf) = self.current_buf_mut() {
                         match direction {
                             Direction::Up => {
-                                buf.break_line(cursor);
+                                buf.break_line();
+                                self.move_cursor_start_of_the_line();
                             }
                             Direction::Down => {
-                                buf.break_line(cursor);
+                                buf.break_line();
                                 self.handle_cursor_movment(Direction::Down);
                                 self.move_cursor_start_of_the_line();
                             }
@@ -201,8 +193,6 @@ impl Editor {
                     }
                 }
                 (Action::DeleteLine, Mode::Normal) => {
-                    let cursor = self.cursor;
-
                     if let Some(buf) = self.current_buf_mut() {
                         buf.delete_line(cursor.y);
                         self.clear_last_line(&mut stdout)?;
@@ -238,56 +228,31 @@ impl Editor {
     }
 
     fn move_cursor_start_of_the_line(&mut self) {
-        self.cursor.x = 0;
+        if let Some(buf) = self.current_buf_mut() {
+            buf.move_cursor_start_of_the_line()
+        }
     }
 
     fn move_cursor_end_of_the_line(&mut self) {
-        if let Some(current_buffer) = self.current_buf() {
-            self.cursor.x = current_buffer.line_width(self.cursor.x).unwrap_or(0);
+        if let Some(buf) = self.current_buf_mut() {
+            buf.move_cursor_end_of_the_line()
         };
     }
 
     fn handle_cursor_movment(&mut self, direction: Direction) {
-        let Some(current_buffer) = self.current_buf() else {
-            return;
+        let mode = self.mode;
+        if let Some(buf) = self.current_buf_mut() {
+            buf.handle_cursor_movment(mode, direction)
         };
+    }
 
-        match direction {
-            Direction::Up => {
-                let line = self.cursor.y.saturating_sub(1);
-                let width = current_buffer
-                    .line_width(line)
-                    .unwrap_or(0)
-                    .saturating_sub(1);
-
-                self.cursor.y = line;
-                self.cursor.x = min(width, self.cursor.x);
-            }
-            Direction::Down => {
-                let line = min(current_buffer.height().saturating_sub(1), self.cursor.y + 1);
-                let width = current_buffer
-                    .line_width(line)
-                    .unwrap_or(0)
-                    .saturating_sub(1);
-
-                self.cursor.y = line;
-                self.cursor.x = min(width, self.cursor.x);
-            }
-            Direction::Left => self.cursor.x = self.cursor.x.saturating_sub(1),
-            Direction::Right => {
-                let mut width = current_buffer.line_width(self.cursor.y).unwrap_or(0);
-
-                if matches!(self.mode, Mode::Normal) {
-                    width -= 1;
-                }
-
-                self.cursor.x = min(width, self.cursor.x + 1)
-            }
-        }
+    fn cursor(&self) -> Pos {
+        self.current_buf().map(|b| b.cursor).unwrap_or_default()
     }
 
     fn move_cursor(&self, stdout: &mut Stdout) -> anyhow::Result<()> {
-        stdout.queue(cursor::MoveTo(self.cursor.x as u16, self.cursor.y as u16))?;
+        let cursor = self.cursor();
+        stdout.queue(cursor::MoveTo(cursor.x as u16, cursor.y as u16))?;
 
         Ok(())
     }
